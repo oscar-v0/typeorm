@@ -283,7 +283,7 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
     /**
      * Creates a new table schema.
      */
-    async createSchema(schema: string, ifNotExist?: boolean): Promise<void> {
+    async createSchema(schemaPath: string, ifNotExist?: boolean): Promise<void> {
         throw new TypeORMError(`Schema create queries are not supported by MySql driver.`);
     }
 
@@ -390,6 +390,7 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
         const oldTable = oldTableOrName instanceof Table ? oldTableOrName : await this.getCachedTable(oldTableOrName);
         const newTable = oldTable.clone();
         const dbName = oldTable.name.indexOf(".") === -1 ? undefined : oldTable.name.split(".")[0];
+
         newTable.name = dbName ? `${dbName}.${newTableName}` : newTableName;
 
         // rename table
@@ -506,7 +507,7 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
 
         } else if (column.isUnique) {
             const uniqueIndex = new TableIndex({
-                name: this.connection.namingStrategy.indexName(table.name, [column.name]),
+                name: this.connection.namingStrategy.indexName(table, [column.name]),
                 columnNames: [column.name],
                 isUnique: true
             });
@@ -709,7 +710,7 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
             if (newColumn.isUnique !== oldColumn.isUnique) {
                 if (newColumn.isUnique === true) {
                     const uniqueIndex = new TableIndex({
-                        name: this.connection.namingStrategy.indexName(table.name, [newColumn.name]),
+                        name: this.connection.namingStrategy.indexName(table, [newColumn.name]),
                         columnNames: [newColumn.name],
                         isUnique: true
                     });
@@ -811,12 +812,12 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
 
         } else if (column.isUnique) {
             // we splice constraints both from table uniques and indices.
-            const uniqueName = this.connection.namingStrategy.uniqueConstraintName(table.name, [column.name]);
+            const uniqueName = this.connection.namingStrategy.uniqueConstraintName(table, [column.name]);
             const foundUnique = clonedTable.uniques.find(unique => unique.name === uniqueName);
             if (foundUnique)
                 clonedTable.uniques.splice(clonedTable.uniques.indexOf(foundUnique), 1);
 
-            const indexName = this.connection.namingStrategy.indexName(table.name, [column.name]);
+            const indexName = this.connection.namingStrategy.indexName(table, [column.name]);
             const foundIndex = clonedTable.indices.find(index => index.name === indexName);
             if (foundIndex)
                 clonedTable.indices.splice(clonedTable.indices.indexOf(foundIndex), 1);
@@ -1024,7 +1025,7 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
 
         // new FK may be passed without name. In this case we generate FK name manually.
         if (!foreignKey.name)
-            foreignKey.name = this.connection.namingStrategy.foreignKeyName(table.name, foreignKey.columnNames);
+            foreignKey.name = this.connection.namingStrategy.foreignKeyName(table, foreignKey.columnNames);
 
         const up = this.createForeignKeySql(table, foreignKey);
         const down = this.dropForeignKeySql(table, foreignKey);
@@ -1071,7 +1072,7 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
 
         // new index may be passed without name. In this case we generate index name manually.
         if (!index.name)
-            index.name = this.connection.namingStrategy.indexName(table.name, index.columnNames, index.where);
+            index.name = this.connection.namingStrategy.indexName(table, index.columnNames, index.where);
 
         const up = this.createIndexSql(table, index);
         const down = this.dropIndexSql(table, index);
@@ -1163,10 +1164,15 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
     // Protected Methods
     // -------------------------------------------------------------------------
 
-    protected async loadViews(viewNames: string[]): Promise<View[]> {
+    protected async loadViews(viewNames?: string[]): Promise<View[]> {
         const hasTable = await this.hasTable(this.getTypeormMetadataTableName());
-        if (!hasTable)
-            return Promise.resolve([]);
+        if (!hasTable) {
+            return [];
+        }
+
+        if (!viewNames) {
+            viewNames = []
+        }
 
         const currentDatabase = await this.getCurrentDatabase();
         const viewsCondition = viewNames.map(tableName => {
@@ -1193,67 +1199,69 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
     /**
      * Loads all tables (with given names) from the database and creates a Table from them.
      */
-    protected async loadTables(tableNames: string[]): Promise<Table[]> {
-
+    protected async loadTables(tableNames?: string[]): Promise<Table[]> {
         // if no tables given then no need to proceed
-        if (!tableNames || !tableNames.length)
+        if (tableNames && tableNames.length === 0) {
             return [];
+        }
+
+        const dbTables: { TABLE_NAME: string, TABLE_SCHEMA: string }[] = [];
 
         const currentDatabase = await this.getCurrentDatabase();
-        const tablesCondition = tableNames.map(tableName => {
-            let [database, name] = tableName.split(".");
-            if (!name) {
-                name = database;
-                database = this.driver.database || currentDatabase;
-            }
-            return `(\`TABLE_SCHEMA\` = '${database}' AND \`TABLE_NAME\` = '${name}')`;
+
+        if (!tableNames) {
+            const tablesSql = `SELECT TABLE_NAME, TABLE_SCHEMA FROM \`INFORMATION_SCHEMA\`.\`TABLES\``;
+
+            dbTables.push(...await this.query(tablesSql));
+        } else {
+            const tablesCondition = tableNames.map(tableName => {
+                let [database, name] = tableName.split(".");
+                if (!name) {
+                    name = database;
+                    database = this.driver.database || currentDatabase;
+                }
+                return `(\`TABLE_SCHEMA\` = '${database}' AND \`TABLE_NAME\` = '${name}')`;
+            }).join(" OR ");
+            const tablesSql = `SELECT TABLE_NAME, TABLE_SCHEMA FROM \`INFORMATION_SCHEMA\`.\`TABLES\` WHERE ` + tablesCondition;
+
+            dbTables.push(...await this.query(tablesSql));
+        }
+
+        if (dbTables.length === 0) {
+            return [];
+        }
+
+        const columnsCondition = dbTables.map(({ TABLE_NAME, TABLE_SCHEMA }) => {
+            return `(\`TABLE_SCHEMA\` = '${TABLE_SCHEMA}' AND \`TABLE_NAME\` = '${TABLE_NAME}')`;
         }).join(" OR ");
-        const tablesSql = `SELECT * FROM \`INFORMATION_SCHEMA\`.\`TABLES\` WHERE ` + tablesCondition;
+        const columnsSql = `SELECT * FROM \`INFORMATION_SCHEMA\`.\`COLUMNS\` WHERE ` + columnsCondition;
 
-        const columnsSql = `SELECT * FROM \`INFORMATION_SCHEMA\`.\`COLUMNS\` WHERE ` + tablesCondition;
-
-        const primaryKeySql = `SELECT * FROM \`INFORMATION_SCHEMA\`.\`KEY_COLUMN_USAGE\` WHERE \`CONSTRAINT_NAME\` = 'PRIMARY' AND (${tablesCondition})`;
+        const primaryKeySql = `SELECT * FROM \`INFORMATION_SCHEMA\`.\`KEY_COLUMN_USAGE\` WHERE \`CONSTRAINT_NAME\` = 'PRIMARY' AND (${columnsCondition})`;
 
         const collationsSql = `SELECT \`SCHEMA_NAME\`, \`DEFAULT_CHARACTER_SET_NAME\` as \`CHARSET\`, \`DEFAULT_COLLATION_NAME\` AS \`COLLATION\` FROM \`INFORMATION_SCHEMA\`.\`SCHEMATA\``;
 
-        const indicesCondition = tableNames.map(tableName => {
-            let [database, name] = tableName.split(".");
-            if (!name) {
-                name = database;
-                database = this.driver.database || currentDatabase;
-            }
-            return `(\`s\`.\`TABLE_SCHEMA\` = '${database}' AND \`s\`.\`TABLE_NAME\` = '${name}')`;
+        const indicesCondition = dbTables.map(({ TABLE_NAME, TABLE_SCHEMA }) => {
+            return `(\`s\`.\`TABLE_SCHEMA\` = '${TABLE_SCHEMA}' AND \`s\`.\`TABLE_NAME\` = '${TABLE_NAME}')`;
         }).join(" OR ");
         const indicesSql = `SELECT \`s\`.* FROM \`INFORMATION_SCHEMA\`.\`STATISTICS\` \`s\` ` +
             `LEFT JOIN \`INFORMATION_SCHEMA\`.\`REFERENTIAL_CONSTRAINTS\` \`rc\` ON \`s\`.\`INDEX_NAME\` = \`rc\`.\`CONSTRAINT_NAME\` ` +
             `WHERE (${indicesCondition}) AND \`s\`.\`INDEX_NAME\` != 'PRIMARY' AND \`rc\`.\`CONSTRAINT_NAME\` IS NULL`;
 
-        const foreignKeysCondition = tableNames.map(tableName => {
-            let [database, name] = tableName.split(".");
-            if (!name) {
-                name = database;
-                database = this.driver.database || currentDatabase;
-            }
-            return `(\`kcu\`.\`TABLE_SCHEMA\` = '${database}' AND \`kcu\`.\`TABLE_NAME\` = '${name}')`;
+        const foreignKeysCondition = dbTables.map(({ TABLE_NAME, TABLE_SCHEMA }) => {
+            return `(\`kcu\`.\`TABLE_SCHEMA\` = '${TABLE_SCHEMA}' AND \`kcu\`.\`TABLE_NAME\` = '${TABLE_NAME}')`;
         }).join(" OR ");
         const foreignKeysSql = `SELECT \`kcu\`.\`TABLE_SCHEMA\`, \`kcu\`.\`TABLE_NAME\`, \`kcu\`.\`CONSTRAINT_NAME\`, \`kcu\`.\`COLUMN_NAME\`, \`kcu\`.\`REFERENCED_TABLE_SCHEMA\`, ` +
             `\`kcu\`.\`REFERENCED_TABLE_NAME\`, \`kcu\`.\`REFERENCED_COLUMN_NAME\`, \`rc\`.\`DELETE_RULE\` \`ON_DELETE\`, \`rc\`.\`UPDATE_RULE\` \`ON_UPDATE\` ` +
             `FROM \`INFORMATION_SCHEMA\`.\`KEY_COLUMN_USAGE\` \`kcu\` ` +
             `INNER JOIN \`INFORMATION_SCHEMA\`.\`REFERENTIAL_CONSTRAINTS\` \`rc\` ON \`rc\`.\`constraint_name\` = \`kcu\`.\`constraint_name\` ` +
             `WHERE ` + foreignKeysCondition;
-        const [dbTables, dbColumns, dbPrimaryKeys, dbCollations, dbIndices, dbForeignKeys]: ObjectLiteral[][] = await Promise.all([
-            this.query(tablesSql),
+        const [dbColumns, dbPrimaryKeys, dbCollations, dbIndices, dbForeignKeys]: ObjectLiteral[][] = await Promise.all([
             this.query(columnsSql),
             this.query(primaryKeySql),
             this.query(collationsSql),
             this.query(indicesSql),
             this.query(foreignKeysSql)
         ]);
-
-        // if tables were not found in the db, no need to proceed
-        if (!dbTables.length)
-            return [];
-
 
         // create tables for loaded tables
         return Promise.all(dbTables.map(async dbTable => {
@@ -1264,19 +1272,17 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
             const defaultCharset = dbCollation["CHARSET"];
 
             // We do not need to join database name, when database is by default.
-            // In this case we need local variable `tableFullName` for below comparision.
             const db = dbTable["TABLE_SCHEMA"] === currentDatabase ? undefined : dbTable["TABLE_SCHEMA"];
+            table.database = dbTable["TABLE_SCHEMA"];
             table.name = this.driver.buildTableName(dbTable["TABLE_NAME"], undefined, db);
-            const tableFullName = this.driver.buildTableName(dbTable["TABLE_NAME"], undefined, dbTable["TABLE_SCHEMA"]);
 
             // create columns from the loaded columns
             table.columns = dbColumns
-                .filter(dbColumn => this.driver.buildTableName(dbColumn["TABLE_NAME"], undefined, dbColumn["TABLE_SCHEMA"]) === tableFullName)
+                .filter(dbColumn => dbColumn["TABLE_NAME"] === dbTable["TABLE_NAME"] && dbColumn["TABLE_SCHEMA"] === dbTable["TABLE_SCHEMA"])
                 .map(dbColumn => {
 
                     const columnUniqueIndex = dbIndices.find(dbIndex => {
-                        const indexTableFullName = this.driver.buildTableName(dbIndex["TABLE_NAME"], undefined, dbIndex["TABLE_SCHEMA"]);
-                        if (indexTableFullName !== tableFullName) {
+                        if (dbIndex["TABLE_NAME"] !== dbTable["TABLE_NAME"] || dbIndex["TABLE_SCHEMA"] !== dbTable["TABLE_SCHEMA"]) {
                             return false;
                         }
 
@@ -1326,7 +1332,11 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
                     tableColumn.isUnique = !!columnUniqueIndex && !hasIgnoredIndex && !isConstraintComposite;
                     tableColumn.isNullable = dbColumn["IS_NULLABLE"] === "YES";
                     tableColumn.isPrimary = dbPrimaryKeys.some(dbPrimaryKey => {
-                        return this.driver.buildTableName(dbPrimaryKey["TABLE_NAME"], undefined, dbPrimaryKey["TABLE_SCHEMA"]) === tableFullName && dbPrimaryKey["COLUMN_NAME"] === tableColumn.name;
+                        return (
+                            dbPrimaryKey["TABLE_NAME"] === dbColumn["TABLE_NAME"] &&
+                            dbPrimaryKey["TABLE_SCHEMA"] === dbColumn["TABLE_SCHEMA"] &&
+                            dbPrimaryKey["COLUMN_NAME"] === dbColumn["COLUMN_NAME"]
+                        );
                     });
                     tableColumn.zerofill = dbColumn["COLUMN_TYPE"].indexOf("zerofill") !== -1;
                     tableColumn.unsigned = tableColumn.zerofill ? true : dbColumn["COLUMN_TYPE"].indexOf("unsigned") !== -1;
@@ -1373,7 +1383,10 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
 
             // find foreign key constraints of table, group them by constraint name and build TableForeignKey.
             const tableForeignKeyConstraints = OrmUtils.uniq(dbForeignKeys.filter(dbForeignKey => {
-                return this.driver.buildTableName(dbForeignKey["TABLE_NAME"], undefined, dbForeignKey["TABLE_SCHEMA"]) === tableFullName;
+                return (
+                    dbForeignKey["TABLE_NAME"] === dbTable["TABLE_NAME"] &&
+                    dbForeignKey["TABLE_SCHEMA"] === dbTable["TABLE_SCHEMA"]
+                );
             }), dbForeignKey => dbForeignKey["CONSTRAINT_NAME"]);
 
             table.foreignKeys = tableForeignKeyConstraints.map(dbForeignKey => {
@@ -1386,6 +1399,7 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
                 return new TableForeignKey({
                     name: dbForeignKey["CONSTRAINT_NAME"],
                     columnNames: foreignKeys.map(dbFk => dbFk["COLUMN_NAME"]),
+                    referencedDatabase: dbForeignKey["REFERENCED_TABLE_SCHEMA"],
                     referencedTableName: referencedTableName,
                     referencedColumnNames: foreignKeys.map(dbFk => dbFk["REFERENCED_COLUMN_NAME"]),
                     onDelete: dbForeignKey["ON_DELETE"],
@@ -1395,7 +1409,10 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
 
             // find index constraints of table, group them by constraint name and build TableIndex.
             const tableIndexConstraints = OrmUtils.uniq(dbIndices.filter(dbIndex => {
-                return this.driver.buildTableName(dbIndex["TABLE_NAME"], undefined, dbIndex["TABLE_SCHEMA"]) === tableFullName;
+                return (
+                    dbIndex["TABLE_NAME"] === dbTable["TABLE_NAME"] &&
+                    dbIndex["TABLE_SCHEMA"] === dbTable["TABLE_SCHEMA"]
+                );
             }), dbIndex => dbIndex["INDEX_NAME"]);
 
             table.indices = tableIndexConstraints.map(constraint => {
@@ -1441,7 +1458,7 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
                 });
                 if (!isUniqueIndexExist && !isUniqueConstraintExist)
                     table.indices.push(new TableIndex({
-                        name: this.connection.namingStrategy.uniqueConstraintName(table.name, [column.name]),
+                        name: this.connection.namingStrategy.uniqueConstraintName(table, [column.name]),
                         columnNames: [column.name],
                         isUnique: true
                     }));
@@ -1465,7 +1482,7 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
             const indicesSql = table.indices.map(index => {
                 const columnNames = index.columnNames.map(columnName => `\`${columnName}\``).join(", ");
                 if (!index.name)
-                    index.name = this.connection.namingStrategy.indexName(table.name, index.columnNames, index.where);
+                    index.name = this.connection.namingStrategy.indexName(table, index.columnNames, index.where);
 
                 let indexType = "";
                 if (index.isUnique)
@@ -1484,7 +1501,7 @@ export class AuroraDataApiQueryRunner extends BaseQueryRunner implements QueryRu
             const foreignKeysSql = table.foreignKeys.map(fk => {
                 const columnNames = fk.columnNames.map(columnName => `\`${columnName}\``).join(", ");
                 if (!fk.name)
-                    fk.name = this.connection.namingStrategy.foreignKeyName(table.name, fk.columnNames);
+                    fk.name = this.connection.namingStrategy.foreignKeyName(table, fk.columnNames);
                 const referencedColumnNames = fk.referencedColumnNames.map(columnName => `\`${columnName}\``).join(", ");
 
                 let constraint = `CONSTRAINT \`${fk.name}\` FOREIGN KEY (${columnNames}) REFERENCES ${this.escapePath(fk.referencedTableName)} (${referencedColumnNames})`;

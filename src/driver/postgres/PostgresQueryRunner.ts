@@ -378,7 +378,9 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
     /**
      * Creates a new table schema.
      */
-    async createSchema(schema: string, ifNotExist?: boolean): Promise<void> {
+    async createSchema(schemaPath: string, ifNotExist?: boolean): Promise<void> {
+        const schema = schemaPath.indexOf(".") === -1 ? schemaPath : schemaPath.split(".")[1];
+
         const up = ifNotExist ? `CREATE SCHEMA IF NOT EXISTS "${schema}"` : `CREATE SCHEMA "${schema}"`;
         const down = `DROP SCHEMA "${schema}" CASCADE`;
         await this.executeQueries(new Query(up), new Query(down));
@@ -388,7 +390,8 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
      * Drops table schema.
      */
     async dropSchema(schemaPath: string, ifExist?: boolean, isCascade?: boolean): Promise<void> {
-        const schema = schemaPath.indexOf(".") === -1 ? schemaPath : schemaPath.split(".")[0];
+        const schema = schemaPath.indexOf(".") === -1 ? schemaPath : schemaPath.split(".")[1];
+
         const up = ifExist ? `DROP SCHEMA IF EXISTS "${schema}" ${isCascade ? "CASCADE" : ""}` : `DROP SCHEMA "${schema}" ${isCascade ? "CASCADE" : ""}`;
         const down = `CREATE SCHEMA "${schema}"`;
         await this.executeQueries(new Query(up), new Query(down));
@@ -434,7 +437,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
                 // new index may be passed without name. In this case we generate index name manually.
                 if (!index.name)
-                    index.name = this.connection.namingStrategy.indexName(table.name, index.columnNames, index.where);
+                    index.name = this.connection.namingStrategy.indexName(table, index.columnNames, index.where);
                 upQueries.push(this.createIndexSql(table, index));
                 downQueries.push(this.dropIndexSql(table, index));
             });
@@ -516,6 +519,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
         const newTable = oldTable.clone();
         const oldTableName = oldTable.name.indexOf(".") === -1 ? oldTable.name : oldTable.name.split(".")[1];
         const schemaName = oldTable.name.indexOf(".") === -1 ? undefined : oldTable.name.split(".")[0];
+
         newTable.name = schemaName ? `${schemaName}.${newTableName}` : newTableName;
 
         upQueries.push(new Query(`ALTER TABLE ${this.escapePath(oldTable)} RENAME TO "${newTableName}"`));
@@ -626,14 +630,14 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
             const primaryColumns = clonedTable.primaryColumns;
             // if table already have primary key, me must drop it and recreate again
             if (primaryColumns.length > 0) {
-                const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable.name, primaryColumns.map(column => column.name));
+                const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable, primaryColumns.map(column => column.name));
                 const columnNames = primaryColumns.map(column => `"${column.name}"`).join(", ");
                 upQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} DROP CONSTRAINT "${pkName}"`));
                 downQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} ADD CONSTRAINT "${pkName}" PRIMARY KEY (${columnNames})`));
             }
 
             primaryColumns.push(column);
-            const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable.name, primaryColumns.map(column => column.name));
+            const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable, primaryColumns.map(column => column.name));
             const columnNames = primaryColumns.map(column => `"${column.name}"`).join(", ");
             upQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} ADD CONSTRAINT "${pkName}" PRIMARY KEY (${columnNames})`));
             downQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} DROP CONSTRAINT "${pkName}"`));
@@ -649,7 +653,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
         // create unique constraint
         if (column.isUnique) {
             const uniqueConstraint = new TableUnique({
-                name: this.connection.namingStrategy.uniqueConstraintName(table.name, [column.name]),
+                name: this.connection.namingStrategy.uniqueConstraintName(table, [column.name]),
                 columnNames: [column.name]
             });
             clonedTable.uniques.push(uniqueConstraint);
@@ -905,7 +909,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
                 // if primary column state changed, we must always drop existed constraint.
                 if (primaryColumns.length > 0) {
-                    const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable.name, primaryColumns.map(column => column.name));
+                    const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable, primaryColumns.map(column => column.name));
                     const columnNames = primaryColumns.map(column => `"${column.name}"`).join(", ");
                     upQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} DROP CONSTRAINT "${pkName}"`));
                     downQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} ADD CONSTRAINT "${pkName}" PRIMARY KEY (${columnNames})`));
@@ -916,7 +920,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
                     // update column in table
                     const column = clonedTable.columns.find(column => column.name === newColumn.name);
                     column!.isPrimary = true;
-                    const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable.name, primaryColumns.map(column => column.name));
+                    const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable, primaryColumns.map(column => column.name));
                     const columnNames = primaryColumns.map(column => `"${column.name}"`).join(", ");
                     upQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} ADD CONSTRAINT "${pkName}" PRIMARY KEY (${columnNames})`));
                     downQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} DROP CONSTRAINT "${pkName}"`));
@@ -931,7 +935,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
                     // if we have another primary keys, we must recreate constraint.
                     if (primaryColumns.length > 0) {
-                        const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable.name, primaryColumns.map(column => column.name));
+                        const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable, primaryColumns.map(column => column.name));
                         const columnNames = primaryColumns.map(column => `"${column.name}"`).join(", ");
                         upQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} ADD CONSTRAINT "${pkName}" PRIMARY KEY (${columnNames})`));
                         downQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} DROP CONSTRAINT "${pkName}"`));
@@ -942,7 +946,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
             if (newColumn.isUnique !== oldColumn.isUnique) {
                 if (newColumn.isUnique === true) {
                     const uniqueConstraint = new TableUnique({
-                        name: this.connection.namingStrategy.uniqueConstraintName(table.name, [newColumn.name]),
+                        name: this.connection.namingStrategy.uniqueConstraintName(table, [newColumn.name]),
                         columnNames: [newColumn.name]
                     });
                     clonedTable.uniques.push(uniqueConstraint);
@@ -1028,7 +1032,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
         // drop primary key constraint
         if (column.isPrimary) {
-            const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable.name, clonedTable.primaryColumns.map(column => column.name));
+            const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable, clonedTable.primaryColumns.map(column => column.name));
             const columnNames = clonedTable.primaryColumns.map(primaryColumn => `"${primaryColumn.name}"`).join(", ");
             upQueries.push(new Query(`ALTER TABLE ${this.escapePath(clonedTable)} DROP CONSTRAINT "${pkName}"`));
             downQueries.push(new Query(`ALTER TABLE ${this.escapePath(clonedTable)} ADD CONSTRAINT "${pkName}" PRIMARY KEY (${columnNames})`));
@@ -1039,7 +1043,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
             // if primary key have multiple columns, we must recreate it without dropped column
             if (clonedTable.primaryColumns.length > 0) {
-                const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable.name, clonedTable.primaryColumns.map(column => column.name));
+                const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable, clonedTable.primaryColumns.map(column => column.name));
                 const columnNames = clonedTable.primaryColumns.map(primaryColumn => `"${primaryColumn.name}"`).join(", ");
                 upQueries.push(new Query(`ALTER TABLE ${this.escapePath(clonedTable)} ADD CONSTRAINT "${pkName}" PRIMARY KEY (${columnNames})`));
                 downQueries.push(new Query(`ALTER TABLE ${this.escapePath(clonedTable)} DROP CONSTRAINT "${pkName}"`));
@@ -1132,7 +1136,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
         // if table already have primary columns, we must drop them.
         const primaryColumns = clonedTable.primaryColumns;
         if (primaryColumns.length > 0) {
-            const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable.name, primaryColumns.map(column => column.name));
+            const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable, primaryColumns.map(column => column.name));
             const columnNamesString = primaryColumns.map(column => `"${column.name}"`).join(", ");
             upQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} DROP CONSTRAINT "${pkName}"`));
             downQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} ADD CONSTRAINT "${pkName}" PRIMARY KEY (${columnNamesString})`));
@@ -1143,7 +1147,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
             .filter(column => columnNames.indexOf(column.name) !== -1)
             .forEach(column => column.isPrimary = true);
 
-        const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable.name, columnNames);
+        const pkName = this.connection.namingStrategy.primaryKeyName(clonedTable, columnNames);
         const columnNamesString = columnNames.map(columnName => `"${columnName}"`).join(", ");
         upQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} ADD CONSTRAINT "${pkName}" PRIMARY KEY (${columnNamesString})`));
         downQueries.push(new Query(`ALTER TABLE ${this.escapePath(table)} DROP CONSTRAINT "${pkName}"`));
@@ -1173,7 +1177,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
         // new unique constraint may be passed without name. In this case we generate unique name manually.
         if (!uniqueConstraint.name)
-            uniqueConstraint.name = this.connection.namingStrategy.uniqueConstraintName(table.name, uniqueConstraint.columnNames);
+            uniqueConstraint.name = this.connection.namingStrategy.uniqueConstraintName(table, uniqueConstraint.columnNames);
 
         const up = this.createUniqueConstraintSql(table, uniqueConstraint);
         const down = this.dropUniqueConstraintSql(table, uniqueConstraint);
@@ -1222,7 +1226,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
         // new unique constraint may be passed without name. In this case we generate unique name manually.
         if (!checkConstraint.name)
-            checkConstraint.name = this.connection.namingStrategy.checkConstraintName(table.name, checkConstraint.expression!);
+            checkConstraint.name = this.connection.namingStrategy.checkConstraintName(table, checkConstraint.expression!);
 
         const up = this.createCheckConstraintSql(table, checkConstraint);
         const down = this.dropCheckConstraintSql(table, checkConstraint);
@@ -1269,7 +1273,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
         // new unique constraint may be passed without name. In this case we generate unique name manually.
         if (!exclusionConstraint.name)
-            exclusionConstraint.name = this.connection.namingStrategy.exclusionConstraintName(table.name, exclusionConstraint.expression!);
+            exclusionConstraint.name = this.connection.namingStrategy.exclusionConstraintName(table, exclusionConstraint.expression!);
 
         const up = this.createExclusionConstraintSql(table, exclusionConstraint);
         const down = this.dropExclusionConstraintSql(table, exclusionConstraint);
@@ -1316,7 +1320,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
         // new FK may be passed without name. In this case we generate FK name manually.
         if (!foreignKey.name)
-            foreignKey.name = this.connection.namingStrategy.foreignKeyName(table.name, foreignKey.columnNames, foreignKey.referencedTableName, foreignKey.referencedColumnNames);
+            foreignKey.name = this.connection.namingStrategy.foreignKeyName(table, foreignKey.columnNames, foreignKey.referencedTableName, foreignKey.referencedColumnNames);
 
         const up = this.createForeignKeySql(table, foreignKey);
         const down = this.dropForeignKeySql(table, foreignKey);
@@ -1365,7 +1369,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
         // new index may be passed without name. In this case we generate index name manually.
         if (!index.name)
-            index.name = this.connection.namingStrategy.indexName(table.name, index.columnNames, index.where);
+            index.name = this.connection.namingStrategy.indexName(table, index.columnNames, index.where);
 
         const up = this.createIndexSql(table, index);
         const down = this.dropIndexSql(table, index);
@@ -1470,13 +1474,18 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
     // Protected Methods
     // -------------------------------------------------------------------------
 
-    protected async loadViews(viewNames: string[]): Promise<View[]> {
+    protected async loadViews(viewNames?: string[]): Promise<View[]> {
         const hasTable = await this.hasTable(this.getTypeormMetadataTableName());
+
         if (!hasTable)
-            return Promise.resolve([]);
+            return [];
+
+        if (!viewNames) {
+            viewNames = [];
+        }
 
         const currentSchema = await this.getCurrentSchema()
-        const viewsCondition = viewNames.map(viewName => {
+        const viewsCondition = viewNames.length === 0 ? "1=1" : viewNames.map(viewName => {
             let [schema, name] = viewName.split(".");
             if (!name) {
                 name = schema;
@@ -1504,29 +1513,49 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
     /**
      * Loads all tables (with given names) from the database and creates a Table from them.
      */
-    protected async loadTables(tableNames: string[]): Promise<Table[]> {
+    protected async loadTables(tableNames?: string[]): Promise<Table[]> {
 
         // if no tables given then no need to proceed
-        if (!tableNames || !tableNames.length)
+        if (tableNames && tableNames.length === 0) {
             return [];
+        }
 
-        const currentSchema = await this.getCurrentSchema()
+        const currentSchema = await this.getCurrentSchema();
+        const currentDatabase = await this.getCurrentDatabase();
 
-        const tablesCondition = tableNames.map(tableName => {
-            let [schema, name] = tableName.split(".");
-            if (!name) {
-                name = schema;
-                schema = this.driver.options.schema || currentSchema;
-            }
-            return `("table_schema" = '${schema}' AND "table_name" = '${name}')`;
-        }).join(" OR ");
-        const tablesSql = `SELECT * FROM "information_schema"."tables" WHERE ` + tablesCondition;
+        const dbTables: { table_schema: string, table_name: string }[] = [];
+
+        if (!tableNames) {
+            const tablesSql = `SELECT "table_schema", "table_name" FROM "information_schema"."tables"`
+            dbTables.push(...await this.query(tablesSql));
+        } else {
+            const tablesCondition = tableNames.map(tableName => {
+                let [schema, name] = tableName.split(".");
+                if (!name) {
+                    name = schema;
+                    schema = this.driver.options.schema || currentSchema;
+                }
+                return `("table_schema" = '${schema}' AND "table_name" = '${name}')`;
+
+            }).join(" OR ");
+
+            const tablesSql = `SELECT "table_schema", "table_name" FROM "information_schema"."tables" WHERE ` + tablesCondition;
+            dbTables.push(...await this.query(tablesSql));
+        }
+
+        // if tables were not found in the db, no need to proceed
+        if (dbTables.length === 0) {
+            return [];
+        }
 
         /**
          * Uses standard SQL information_schema.columns table and postgres-specific
          * pg_catalog.pg_attribute table to get column information.
          * @see https://stackoverflow.com/a/19541865
          */
+        const columnsCondition = dbTables.map(({ table_schema, table_name }) => {
+            return `("table_schema" = '${table_schema}' AND "table_name" = '${table_name}')`;
+        }).join(" OR ");
         const columnsSql = `SELECT columns.*, pg_catalog.col_description(('"' || table_catalog || '"."' || table_schema || '"."' || table_name || '"')::regclass::oid, ordinal_position) AS description, ` +
                 `('"' || "udt_schema" || '"."' || "udt_name" || '"')::"regtype" AS "regtype", pg_catalog.format_type("col_attr"."atttypid", "col_attr"."atttypmod") AS "format_type" ` +
             `FROM "information_schema"."columns" ` +
@@ -1537,15 +1566,10 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
                     `WHERE "cls"."relname" = "columns"."table_name" ` +
                     `AND "ns"."nspname" = "columns"."table_schema" `+
                 `) ` +
-            `WHERE ` + tablesCondition;
+            `WHERE ` + columnsCondition;
 
-        const constraintsCondition = tableNames.map(tableName => {
-            let [schema, name] = tableName.split(".");
-            if (!name) {
-                name = schema;
-                schema = this.driver.options.schema || currentSchema;
-            }
-            return `("ns"."nspname" = '${schema}' AND "t"."relname" = '${name}')`;
+        const constraintsCondition = dbTables.map(({ table_schema, table_name }) => {
+            return `("ns"."nspname" = '${table_schema}' AND "t"."relname" = '${table_name}')`;
         }).join(" OR ");
 
         const constraintsSql = `SELECT "ns"."nspname" AS "table_schema", "t"."relname" AS "table_name", "cnst"."conname" AS "constraint_name", ` +
@@ -1569,13 +1593,8 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
             `LEFT JOIN "pg_constraint" "cnst" ON "cnst"."conname" = "i"."relname" ` +
             `WHERE "t"."relkind" IN ('r', 'p') AND "cnst"."contype" IS NULL AND (${constraintsCondition})`;
 
-        const foreignKeysCondition = tableNames.map(tableName => {
-            let [schema, name] = tableName.split(".");
-            if (!name) {
-                name = schema;
-                schema = this.driver.options.schema || currentSchema;
-            }
-            return `("ns"."nspname" = '${schema}' AND "cl"."relname" = '${name}')`;
+        const foreignKeysCondition = dbTables.map(({ table_schema, table_name }) => {
+            return `("ns"."nspname" = '${table_schema}' AND "cl"."relname" = '${table_name}')`;
         }).join(" OR ");
 
         const hasRelispartitionColumn = await this.hasSupportForPartitionedTables();
@@ -1600,16 +1619,12 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
             `INNER JOIN "pg_namespace" "ns" ON "cl"."relnamespace" = "ns"."oid" ` +
             `INNER JOIN "pg_attribute" "att2" ON "att2"."attrelid" = "con"."conrelid" AND "att2"."attnum" = "con"."parent"`;
 
-        const [dbTables, dbColumns, dbConstraints, dbIndices, dbForeignKeys]: ObjectLiteral[][] = await Promise.all([
-            this.query(tablesSql),
+        const [dbColumns, dbConstraints, dbIndices, dbForeignKeys]: ObjectLiteral[][] = await Promise.all([
             this.query(columnsSql),
             this.query(constraintsSql),
             this.query(indicesSql),
             this.query(foreignKeysSql),
         ]);
-        // if tables were not found in the db, no need to proceed
-        if (!dbTables.length)
-            return [];
 
         // create tables for loaded tables
         return Promise.all(dbTables.map(async dbTable => {
@@ -1621,18 +1636,21 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
                     : dbObject[key]
             };
             // We do not need to join schema name, when database is by default.
-            // In this case we need local variable `tableFullName` for below comparison.
             const schema = getSchemaFromKey(dbTable, "table_schema");
+            table.database = currentDatabase;
+            table.schema = dbTable["table_schema"];
             table.name = this.driver.buildTableName(dbTable["table_name"], schema);
-            const tableFullName = this.driver.buildTableName(dbTable["table_name"], dbTable["table_schema"]);
 
             // create columns from the loaded columns
             table.columns = await Promise.all(dbColumns
-                .filter(dbColumn => this.driver.buildTableName(dbColumn["table_name"], dbColumn["table_schema"]) === tableFullName)
+                .filter(dbColumn => (dbColumn["table_name"] === dbTable["table_name"] && dbColumn["table_schema"] === dbTable["table_schema"]))
                 .map(async dbColumn => {
-
                     const columnConstraints = dbConstraints.filter(dbConstraint => {
-                        return this.driver.buildTableName(dbConstraint["table_name"], dbConstraint["table_schema"]) === tableFullName && dbConstraint["column_name"] === dbColumn["column_name"];
+                        return (
+                            dbConstraint["table_name"] === dbColumn["table_name"] &&
+                            dbConstraint["table_schema"] === dbColumn["table_schema"] &&
+                            dbConstraint["column_name"] === dbColumn["column_name"]
+                        );
                     });
 
                     const tableColumn = new TableColumn();
@@ -1701,11 +1719,17 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
                           "type"
                         FROM "geometry_columns"
                       ) AS _
-                      WHERE (${tablesCondition}) AND "column_name" = '${tableColumn.name}' AND "table_name" = '${dbTable["table_name"]}'`;
+                      WHERE
+                          "column_name" = '${dbColumn["column_name"]}' AND
+                          "table_schema" = '${dbColumn["table_schema"]}' AND
+                          "table_name" = '${dbColumn["table_name"]}'`;
 
                         const results: ObjectLiteral[] = await this.query(geometryColumnSql);
-                        tableColumn.spatialFeatureType = results[0].type;
-                        tableColumn.srid = results[0].srid;
+
+                        if (results.length > 0) {
+                            tableColumn.spatialFeatureType = results[0].type;
+                            tableColumn.srid = results[0].srid;
+                        }
                     }
 
                     if (tableColumn.type === "geography") {
@@ -1718,11 +1742,17 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
                           "type"
                         FROM "geography_columns"
                       ) AS _
-                      WHERE (${tablesCondition}) AND "column_name" = '${tableColumn.name}' AND "table_name" = '${dbTable["table_name"]}'`;
+                      WHERE
+                          "column_name" = '${dbColumn["column_name"]}' AND
+                          "table_schema" = '${dbColumn["table_schema"]}' AND
+                          "table_name" = '${dbColumn["table_name"]}'`;
 
                         const results: ObjectLiteral[] = await this.query(geographyColumnSql);
-                        tableColumn.spatialFeatureType = results[0].type;
-                        tableColumn.srid = results[0].srid;
+
+                        if (results.length > 0) {
+                            tableColumn.spatialFeatureType = results[0].type;
+                            tableColumn.srid = results[0].srid;
+                        }
                     }
 
                     // check only columns that have length property
@@ -1774,8 +1804,11 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
             // find unique constraints of table, group them by constraint name and build TableUnique.
             const tableUniqueConstraints = OrmUtils.uniq(dbConstraints.filter(dbConstraint => {
-                return this.driver.buildTableName(dbConstraint["table_name"], dbConstraint["table_schema"]) === tableFullName
-                    && dbConstraint["constraint_type"] === "UNIQUE";
+                return (
+                    dbConstraint["table_name"] === dbTable["table_name"] &&
+                    dbConstraint["table_schema"] === dbTable["table_schema"] &&
+                    dbConstraint["constraint_type"] === "UNIQUE"
+                );
             }), dbConstraint => dbConstraint["constraint_name"]);
 
             table.uniques = tableUniqueConstraints.map(constraint => {
@@ -1788,8 +1821,11 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
             // find check constraints of table, group them by constraint name and build TableCheck.
             const tableCheckConstraints = OrmUtils.uniq(dbConstraints.filter(dbConstraint => {
-                return this.driver.buildTableName(dbConstraint["table_name"], dbConstraint["table_schema"]) === tableFullName
-                    && dbConstraint["constraint_type"] === "CHECK";
+                return (
+                    dbConstraint["table_name"] === dbTable["table_name"] &&
+                    dbConstraint["table_schema"] === dbTable["table_schema"] &&
+                    dbConstraint["constraint_type"] === "CHECK"
+                );
             }), dbConstraint => dbConstraint["constraint_name"]);
 
             table.checks = tableCheckConstraints.map(constraint => {
@@ -1803,8 +1839,11 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
             // find exclusion constraints of table, group them by constraint name and build TableExclusion.
             const tableExclusionConstraints = OrmUtils.uniq(dbConstraints.filter(dbConstraint => {
-                return this.driver.buildTableName(dbConstraint["table_name"], dbConstraint["table_schema"]) === tableFullName
-                    && dbConstraint["constraint_type"] === "EXCLUDE";
+                return (
+                    dbConstraint["table_name"] === dbTable["table_name"] &&
+                    dbConstraint["table_schema"] === dbTable["table_schema"] &&
+                    dbConstraint["constraint_type"] === "EXCLUDE"
+                );
             }), dbConstraint => dbConstraint["constraint_name"]);
 
             table.exclusions = tableExclusionConstraints.map(constraint => {
@@ -1816,7 +1855,10 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
             // find foreign key constraints of table, group them by constraint name and build TableForeignKey.
             const tableForeignKeyConstraints = OrmUtils.uniq(dbForeignKeys.filter(dbForeignKey => {
-                return this.driver.buildTableName(dbForeignKey["table_name"], dbForeignKey["table_schema"]) === tableFullName;
+                return (
+                    dbForeignKey["table_name"] === dbTable["table_name"] &&
+                    dbForeignKey["table_schema"] === dbTable["table_schema"]
+                );
             }), dbForeignKey => dbForeignKey["constraint_name"]);
 
             table.foreignKeys = tableForeignKeyConstraints.map(dbForeignKey => {
@@ -1839,7 +1881,10 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
             // find index constraints of table, group them by constraint name and build TableIndex.
             const tableIndexConstraints = OrmUtils.uniq(dbIndices.filter(dbIndex => {
-                return this.driver.buildTableName(dbIndex["table_name"], dbIndex["table_schema"]) === tableFullName;
+                return (
+                    dbIndex["table_name"] === dbTable["table_name"] &&
+                    dbIndex["table_schema"] === dbTable["table_schema"]
+                );
             }), dbIndex => dbIndex["constraint_name"]);
 
             table.indices = tableIndexConstraints.map(constraint => {
@@ -1876,14 +1921,14 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
                 const isUniqueExist = table.uniques.some(unique => unique.columnNames.length === 1 && unique.columnNames[0] === column.name);
                 if (!isUniqueExist)
                     table.uniques.push(new TableUnique({
-                        name: this.connection.namingStrategy.uniqueConstraintName(table.name, [column.name]),
+                        name: this.connection.namingStrategy.uniqueConstraintName(table, [column.name]),
                         columnNames: [column.name]
                     }));
             });
 
         if (table.uniques.length > 0) {
             const uniquesSql = table.uniques.map(unique => {
-                const uniqueName = unique.name ? unique.name : this.connection.namingStrategy.uniqueConstraintName(table.name, unique.columnNames);
+                const uniqueName = unique.name ? unique.name : this.connection.namingStrategy.uniqueConstraintName(table, unique.columnNames);
                 const columnNames = unique.columnNames.map(columnName => `"${columnName}"`).join(", ");
                 return `CONSTRAINT "${uniqueName}" UNIQUE (${columnNames})`;
             }).join(", ");
@@ -1893,7 +1938,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
         if (table.checks.length > 0) {
             const checksSql = table.checks.map(check => {
-                const checkName = check.name ? check.name : this.connection.namingStrategy.checkConstraintName(table.name, check.expression!);
+                const checkName = check.name ? check.name : this.connection.namingStrategy.checkConstraintName(table, check.expression!);
                 return `CONSTRAINT "${checkName}" CHECK (${check.expression})`;
             }).join(", ");
 
@@ -1902,7 +1947,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
         if (table.exclusions.length > 0) {
             const exclusionsSql = table.exclusions.map(exclusion => {
-                const exclusionName = exclusion.name ? exclusion.name : this.connection.namingStrategy.exclusionConstraintName(table.name, exclusion.expression!);
+                const exclusionName = exclusion.name ? exclusion.name : this.connection.namingStrategy.exclusionConstraintName(table, exclusion.expression!);
                 return `CONSTRAINT "${exclusionName}" EXCLUDE ${exclusion.expression}`;
             }).join(", ");
 
@@ -1913,7 +1958,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
             const foreignKeysSql = table.foreignKeys.map(fk => {
                 const columnNames = fk.columnNames.map(columnName => `"${columnName}"`).join(", ");
                 if (!fk.name)
-                    fk.name = this.connection.namingStrategy.foreignKeyName(table.name, fk.columnNames, fk.referencedTableName, fk.referencedColumnNames);
+                    fk.name = this.connection.namingStrategy.foreignKeyName(table, fk.columnNames, fk.referencedTableName, fk.referencedColumnNames);
                 const referencedColumnNames = fk.referencedColumnNames.map(columnName => `"${columnName}"`).join(", ");
 
                 let constraint = `CONSTRAINT "${fk.name}" FOREIGN KEY (${columnNames}) REFERENCES ${this.escapePath(fk.referencedTableName)} (${referencedColumnNames})`;
@@ -1932,7 +1977,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
 
         const primaryColumns = table.columns.filter(column => column.isPrimary);
         if (primaryColumns.length > 0) {
-            const primaryKeyName = this.connection.namingStrategy.primaryKeyName(table.name, primaryColumns.map(column => column.name));
+            const primaryKeyName = this.connection.namingStrategy.primaryKeyName(table, primaryColumns.map(column => column.name));
             const columnNames = primaryColumns.map(column => `"${column.name}"`).join(", ");
             sql += `, CONSTRAINT "${primaryKeyName}" PRIMARY KEY (${columnNames})`;
         }
@@ -2089,7 +2134,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
      * Builds create primary key sql.
      */
     protected createPrimaryKeySql(table: Table, columnNames: string[]): Query {
-        const primaryKeyName = this.connection.namingStrategy.primaryKeyName(table.name, columnNames);
+        const primaryKeyName = this.connection.namingStrategy.primaryKeyName(table, columnNames);
         const columnNamesString = columnNames.map(columnName => `"${columnName}"`).join(", ");
         return new Query(`ALTER TABLE ${this.escapePath(table)} ADD CONSTRAINT "${primaryKeyName}" PRIMARY KEY (${columnNamesString})`);
     }
@@ -2099,7 +2144,7 @@ export class PostgresQueryRunner extends BaseQueryRunner implements QueryRunner 
      */
     protected dropPrimaryKeySql(table: Table): Query {
         const columnNames = table.primaryColumns.map(column => column.name);
-        const primaryKeyName = this.connection.namingStrategy.primaryKeyName(table.name, columnNames);
+        const primaryKeyName = this.connection.namingStrategy.primaryKeyName(table, columnNames);
         return new Query(`ALTER TABLE ${this.escapePath(table)} DROP CONSTRAINT "${primaryKeyName}"`);
     }
 

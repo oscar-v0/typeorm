@@ -332,7 +332,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
     /**
      * Creates a new table schema.
      */
-    async createSchema(schema: string, ifNotExist?: boolean): Promise<void> {
+    async createSchema(schemaPath: string, ifNotExist?: boolean): Promise<void> {
         throw new TypeORMError(`Schema create queries are not supported by MySql driver.`);
     }
 
@@ -439,6 +439,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
         const oldTable = oldTableOrName instanceof Table ? oldTableOrName : await this.getCachedTable(oldTableOrName);
         const newTable = oldTable.clone();
         const dbName = oldTable.name.indexOf(".") === -1 ? undefined : oldTable.name.split(".")[0];
+
         newTable.name = dbName ? `${dbName}.${newTableName}` : newTableName;
 
         // rename table
@@ -557,7 +558,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
 
         } else if (column.isUnique) {
             const uniqueIndex = new TableIndex({
-                name: this.connection.namingStrategy.indexName(table.name, [column.name]),
+                name: this.connection.namingStrategy.indexName(table, [column.name]),
                 columnNames: [column.name],
                 isUnique: true
             });
@@ -762,7 +763,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             if (newColumn.isUnique !== oldColumn.isUnique) {
                 if (newColumn.isUnique === true) {
                     const uniqueIndex = new TableIndex({
-                        name: this.connection.namingStrategy.indexName(table.name, [newColumn.name]),
+                        name: this.connection.namingStrategy.indexName(table, [newColumn.name]),
                         columnNames: [newColumn.name],
                         isUnique: true
                     });
@@ -864,12 +865,12 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
 
         } else if (column.isUnique) {
             // we splice constraints both from table uniques and indices.
-            const uniqueName = this.connection.namingStrategy.uniqueConstraintName(table.name, [column.name]);
+            const uniqueName = this.connection.namingStrategy.uniqueConstraintName(table, [column.name]);
             const foundUnique = clonedTable.uniques.find(unique => unique.name === uniqueName);
             if (foundUnique)
                 clonedTable.uniques.splice(clonedTable.uniques.indexOf(foundUnique), 1);
 
-            const indexName = this.connection.namingStrategy.indexName(table.name, [column.name]);
+            const indexName = this.connection.namingStrategy.indexName(table, [column.name]);
             const foundIndex = clonedTable.indices.find(index => index.name === indexName);
             if (foundIndex)
                 clonedTable.indices.splice(clonedTable.indices.indexOf(foundIndex), 1);
@@ -1077,7 +1078,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
 
         // new FK may be passed without name. In this case we generate FK name manually.
         if (!foreignKey.name)
-            foreignKey.name = this.connection.namingStrategy.foreignKeyName(table.name, foreignKey.columnNames, foreignKey.referencedTableName, foreignKey.referencedColumnNames);
+            foreignKey.name = this.connection.namingStrategy.foreignKeyName(table, foreignKey.columnNames, foreignKey.referencedTableName, foreignKey.referencedColumnNames);
 
         const up = this.createForeignKeySql(table, foreignKey);
         const down = this.dropForeignKeySql(table, foreignKey);
@@ -1124,7 +1125,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
 
         // new index may be passed without name. In this case we generate index name manually.
         if (!index.name)
-            index.name = this.connection.namingStrategy.indexName(table.name, index.columnNames, index.where);
+            index.name = this.connection.namingStrategy.indexName(table, index.columnNames, index.where);
 
         const up = this.createIndexSql(table, index);
         const down = this.dropIndexSql(table, index);
@@ -1216,10 +1217,15 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
     // Protected Methods
     // -------------------------------------------------------------------------
 
-    protected async loadViews(viewNames: string[]): Promise<View[]> {
+    protected async loadViews(viewNames?: string[]): Promise<View[]> {
         const hasTable = await this.hasTable(this.getTypeormMetadataTableName());
-        if (!hasTable)
-            return Promise.resolve([]);
+        if (!hasTable) {
+            return [];
+        }
+
+        if (!viewNames) {
+            viewNames = [];
+        }
 
         const currentDatabase = await this.getCurrentDatabase();
         const viewsCondition = viewNames.map(tableName => {
@@ -1246,11 +1252,10 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
     /**
      * Loads all tables (with given names) from the database and creates a Table from them.
      */
-    protected async loadTables(tableNames: string[]): Promise<Table[]> {
-
-        // if no tables given then no need to proceed
-        if (!tableNames || !tableNames.length)
+    protected async loadTables(tableNames?: string[]): Promise<Table[]> {
+        if (tableNames && tableNames.length === 0) {
             return [];
+        }
 
         const currentDatabase = await this.getCurrentDatabase();
 
@@ -1277,106 +1282,99 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
         // will cause the query to not hit the optimizations & do full scans.  This is why
         // a number of queries below do `UNION`s of single `WHERE` clauses.
 
+        const dbTables: { TABLE_SCHEMA: string, TABLE_NAME: string }[] = [];
+
+        if (!tableNames) {
+            // Since we don't have any of this data we have to do a scan
+            const tablesSql = `SELECT \`TABLE_SCHEMA\`, \`TABLE_NAME\` FROM \`INFORMATION_SCHEMA\`.\`TABLES\``;
+
+            dbTables.push(...await this.query(tablesSql));
+        } else {
+            // Avoid data directory scan: TABLE_SCHEMA
+            // Avoid database directory scan: TABLE_NAME
+            // We only use `TABLE_SCHEMA` and `TABLE_NAME` which is `SKIP_OPEN_TABLE`
+            const tablesSql = tableNames.map(tableName => {
+                let [ database, name ] = tableName.split(".");
+                if (!name) {
+                    name = database;
+                    database = this.driver.database || currentDatabase;
+                }
+                return `
+                    SELECT \`TABLE_SCHEMA\`,
+                           \`TABLE_NAME\`
+                    FROM \`INFORMATION_SCHEMA\`.\`TABLES\`
+                    WHERE \`TABLE_SCHEMA\` = '${database}'
+                      AND \`TABLE_NAME\` = '${name}'
+                `;
+            }).join(" UNION ");
+
+            dbTables.push(...await this.query(tablesSql));
+        }
+
+
+        // if tables were not found in the db, no need to proceed
+        if (!dbTables.length)
+            return [];
+
+
         // Avoid data directory scan: TABLE_SCHEMA
         // Avoid database directory scan: TABLE_NAME
         // Full columns: CARDINALITY & INDEX_TYPE - everything else is FRM only
-        const statsSubquerySql = tableNames.map(tableName => {
-            let [database, name] = tableName.split(".");
-            if (!name) {
-                name = database;
-                database = this.driver.database || currentDatabase;
-            }
+        const statsSubquerySql = dbTables.map(({ TABLE_SCHEMA, TABLE_NAME }) => {
             return `
                 SELECT
                     *
                 FROM \`INFORMATION_SCHEMA\`.\`STATISTICS\`
                 WHERE
-                    \`TABLE_SCHEMA\` = '${database}'
+                    \`TABLE_SCHEMA\` = '${TABLE_SCHEMA}'
                     AND
-                    \`TABLE_NAME\` = '${name}'
+                    \`TABLE_NAME\` = '${TABLE_NAME}'
             `;
         }).join(" UNION ");
 
         // Avoid data directory scan: TABLE_SCHEMA
         // Avoid database directory scan: TABLE_NAME
         // All columns will hit the full table.
-        const kcuSubquerySql = tableNames.map(tableName => {
-            let [database, name] = tableName.split(".");
-            if (!name) {
-                name = database;
-                database = this.driver.database || currentDatabase;
-            }
+        const kcuSubquerySql =  dbTables.map(({ TABLE_SCHEMA, TABLE_NAME }) => {
             return `
                 SELECT
                     *
                 FROM \`INFORMATION_SCHEMA\`.\`KEY_COLUMN_USAGE\` \`kcu\`
                 WHERE
-                    \`kcu\`.\`TABLE_SCHEMA\` = '${database}'
+                    \`kcu\`.\`TABLE_SCHEMA\` = '${TABLE_SCHEMA}'
                     AND
-                    \`kcu\`.\`TABLE_NAME\` = '${name}'
+                    \`kcu\`.\`TABLE_NAME\` = '${TABLE_NAME}'
             `;
         }).join(" UNION ");
 
         // Avoid data directory scan: CONSTRAINT_SCHEMA
         // Avoid database directory scan: TABLE_NAME
         // All columns will hit the full table.
-        const rcSubquerySql = tableNames.map(tableName => {
-            let [database, name] = tableName.split(".");
-            if (!name) {
-                name = database;
-                database = this.driver.database || currentDatabase;
-            }
+        const rcSubquerySql = dbTables.map(({ TABLE_SCHEMA, TABLE_NAME }) => {
             return `
                 SELECT
                     *
                 FROM \`INFORMATION_SCHEMA\`.\`REFERENTIAL_CONSTRAINTS\`
                 WHERE
-                    \`CONSTRAINT_SCHEMA\` = '${database}'
+                    \`CONSTRAINT_SCHEMA\` = '${TABLE_SCHEMA}'
                     AND
-                    \`TABLE_NAME\` = '${name}'
+                    \`TABLE_NAME\` = '${TABLE_NAME}'
             `;
         }).join(" UNION ");
 
         // Avoid data directory scan: TABLE_SCHEMA
         // Avoid database directory scan: TABLE_NAME
-        // We only use `TABLE_SCHEMA` and `TABLE_NAME` which is `SKIP_OPEN_TABLE`
-        const tablesSql = tableNames.map(tableName => {
-            let [database, name] = tableName.split(".");
-            if (!name) {
-                name = database;
-                database = this.driver.database || currentDatabase;
-            }
-            return `
-                SELECT
-                    \`TABLE_SCHEMA\`,
-                    \`TABLE_NAME\`
-                FROM
-                    \`INFORMATION_SCHEMA\`.\`TABLES\`
-                WHERE
-                    \`TABLE_SCHEMA\` = '${database}'
-                    AND
-                    \`TABLE_NAME\` = '${name}'
-                `;
-        }).join(" UNION ");
-
-        // Avoid data directory scan: TABLE_SCHEMA
-        // Avoid database directory scan: TABLE_NAME
         // OPEN_FRM_ONLY applies to all columns
-        const columnsSql = tableNames.map(tableName => {
-            let [database, name] = tableName.split(".");
-            if (!name) {
-                name = database;
-                database = this.driver.database || currentDatabase;
-            }
+        const columnsSql = dbTables.map(({ TABLE_SCHEMA, TABLE_NAME }) => {
             return `
                 SELECT
                     *
                 FROM
                     \`INFORMATION_SCHEMA\`.\`COLUMNS\`
                 WHERE
-                    \`TABLE_SCHEMA\` = '${database}'
+                    \`TABLE_SCHEMA\` = '${TABLE_SCHEMA}'
                     AND
-                    \`TABLE_NAME\` = '${name}'
+                    \`TABLE_NAME\` = '${TABLE_NAME}'
                 `;
         }).join(" UNION ");
 
@@ -1430,18 +1428,13 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                     \`rc\`.\`CONSTRAINT_NAME\` = \`kcu\`.\`CONSTRAINT_NAME\`
             `;
 
-        const [dbTables, dbColumns, dbPrimaryKeys, dbCollations, dbIndices, dbForeignKeys]: ObjectLiteral[][] = await Promise.all([
-            this.query(tablesSql),
+        const [dbColumns, dbPrimaryKeys, dbCollations, dbIndices, dbForeignKeys]: ObjectLiteral[][] = await Promise.all([
             this.query(columnsSql),
             this.query(primaryKeySql),
             this.query(collationsSql),
             this.query(indicesSql),
             this.query(foreignKeysSql)
         ]);
-
-        // if tables were not found in the db, no need to proceed
-        if (!dbTables.length)
-            return [];
 
         const isMariaDb = this.driver.options.type === "mariadb";
         const dbVersion = await this.getVersion();
@@ -1455,19 +1448,17 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             const defaultCharset = dbCollation["CHARSET"];
 
             // We do not need to join database name, when database is by default.
-            // In this case we need local variable `tableFullName` for below comparision.
             const db = dbTable["TABLE_SCHEMA"] === currentDatabase ? undefined : dbTable["TABLE_SCHEMA"];
+            table.database = dbTable["TABLE_SCHEMA"];
             table.name = this.driver.buildTableName(dbTable["TABLE_NAME"], undefined, db);
-            const tableFullName = this.driver.buildTableName(dbTable["TABLE_NAME"], undefined, dbTable["TABLE_SCHEMA"]);
 
             // create columns from the loaded columns
             table.columns = dbColumns
-                .filter(dbColumn => this.driver.buildTableName(dbColumn["TABLE_NAME"], undefined, dbColumn["TABLE_SCHEMA"]) === tableFullName)
+                .filter(dbColumn => dbColumn["TABLE_NAME"] === dbTable["TABLE_NAME"] && dbColumn["TABLE_SCHEMA"] === dbTable["TABLE_SCHEMA"])
                 .map(dbColumn => {
 
                     const columnUniqueIndex = dbIndices.find(dbIndex => {
-                        const indexTableFullName = this.driver.buildTableName(dbIndex["TABLE_NAME"], undefined, dbIndex["TABLE_SCHEMA"]);
-                        if (indexTableFullName !== tableFullName) {
+                        if (dbIndex["TABLE_NAME"] !== dbTable["TABLE_NAME"] || dbIndex["TABLE_SCHEMA"] !== dbTable["TABLE_SCHEMA"]) {
                             return false;
                         }
 
@@ -1530,7 +1521,11 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                     tableColumn.isUnique = !!columnUniqueIndex && !hasIgnoredIndex && !isConstraintComposite;
                     tableColumn.isNullable = dbColumn["IS_NULLABLE"] === "YES";
                     tableColumn.isPrimary = dbPrimaryKeys.some(dbPrimaryKey => {
-                        return this.driver.buildTableName(dbPrimaryKey["TABLE_NAME"], undefined, dbPrimaryKey["TABLE_SCHEMA"]) === tableFullName && dbPrimaryKey["COLUMN_NAME"] === tableColumn.name;
+                        return (
+                            dbPrimaryKey["TABLE_NAME"] === dbColumn["TABLE_NAME"] &&
+                            dbPrimaryKey["TABLE_SCHEMA"] === dbColumn["TABLE_SCHEMA"] &&
+                            dbPrimaryKey["COLUMN_NAME"] === dbColumn["COLUMN_NAME"]
+                        );
                     });
                     tableColumn.isGenerated = dbColumn["EXTRA"].indexOf("auto_increment") !== -1;
                     if (tableColumn.isGenerated)
@@ -1575,7 +1570,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
 
             // find foreign key constraints of table, group them by constraint name and build TableForeignKey.
             const tableForeignKeyConstraints = OrmUtils.uniq(dbForeignKeys.filter(dbForeignKey => {
-                return this.driver.buildTableName(dbForeignKey["TABLE_NAME"], undefined, dbForeignKey["TABLE_SCHEMA"]) === tableFullName;
+                return dbForeignKey["TABLE_NAME"] === dbTable["TABLE_NAME"] && dbForeignKey["TABLE_SCHEMA"] === dbTable["TABLE_SCHEMA"];
             }), dbForeignKey => dbForeignKey["CONSTRAINT_NAME"]);
 
             table.foreignKeys = tableForeignKeyConstraints.map(dbForeignKey => {
@@ -1588,6 +1583,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                 return new TableForeignKey({
                     name: dbForeignKey["CONSTRAINT_NAME"],
                     columnNames: foreignKeys.map(dbFk => dbFk["COLUMN_NAME"]),
+                    referencedDatabase: dbForeignKey["REFERENCED_TABLE_SCHEMA"],
                     referencedTableName: referencedTableName,
                     referencedColumnNames: foreignKeys.map(dbFk => dbFk["REFERENCED_COLUMN_NAME"]),
                     onDelete: dbForeignKey["ON_DELETE"],
@@ -1596,9 +1592,9 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             });
 
             // find index constraints of table, group them by constraint name and build TableIndex.
-            const tableIndexConstraints = OrmUtils.uniq(dbIndices.filter(dbIndex => {
-                return this.driver.buildTableName(dbIndex["TABLE_NAME"], undefined, dbIndex["TABLE_SCHEMA"]) === tableFullName;
-            }), dbIndex => dbIndex["INDEX_NAME"]);
+            const tableIndexConstraints = OrmUtils.uniq(dbIndices.filter(dbIndex => (
+                dbIndex["TABLE_NAME"] === dbTable["TABLE_NAME"] && dbIndex["TABLE_SCHEMA"] === dbTable["TABLE_SCHEMA"]
+            )), dbIndex => dbIndex["INDEX_NAME"]);
 
             table.indices = tableIndexConstraints.map(constraint => {
                 const indices = dbIndices.filter(index => {
@@ -1643,7 +1639,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
                 });
                 if (!isUniqueIndexExist && !isUniqueConstraintExist)
                     table.indices.push(new TableIndex({
-                        name: this.connection.namingStrategy.uniqueConstraintName(table.name, [column.name]),
+                        name: this.connection.namingStrategy.uniqueConstraintName(table, [column.name]),
                         columnNames: [column.name],
                         isUnique: true
                     }));
@@ -1667,7 +1663,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             const indicesSql = table.indices.map(index => {
                 const columnNames = index.columnNames.map(columnName => `\`${columnName}\``).join(", ");
                 if (!index.name)
-                    index.name = this.connection.namingStrategy.indexName(table.name, index.columnNames, index.where);
+                    index.name = this.connection.namingStrategy.indexName(table, index.columnNames, index.where);
 
                 let indexType = "";
                 if (index.isUnique)
@@ -1688,7 +1684,7 @@ export class MysqlQueryRunner extends BaseQueryRunner implements QueryRunner {
             const foreignKeysSql = table.foreignKeys.map(fk => {
                 const columnNames = fk.columnNames.map(columnName => `\`${columnName}\``).join(", ");
                 if (!fk.name)
-                    fk.name = this.connection.namingStrategy.foreignKeyName(table.name, fk.columnNames, fk.referencedTableName, fk.referencedColumnNames);
+                    fk.name = this.connection.namingStrategy.foreignKeyName(table, fk.columnNames, fk.referencedTableName, fk.referencedColumnNames);
                 const referencedColumnNames = fk.referencedColumnNames.map(columnName => `\`${columnName}\``).join(", ");
 
                 let constraint = `CONSTRAINT \`${fk.name}\` FOREIGN KEY (${columnNames}) REFERENCES ${this.escapePath(fk.referencedTableName)} (${referencedColumnNames})`;
