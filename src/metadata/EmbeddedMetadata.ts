@@ -198,7 +198,9 @@ export class EmbeddedMetadata {
      */
     create(options?: { fromDeserializer?: boolean }): any {
         if (!options?.fromDeserializer || this.isAlwaysUsingConstructor) {
-            return new (this.type as any)();
+            return typeof this.type === "function"
+                ? new (this.type as any)()
+                : {};
         } else {
             return typeof this.type === "function"
                 ? Object.create(this.type.prototype)
