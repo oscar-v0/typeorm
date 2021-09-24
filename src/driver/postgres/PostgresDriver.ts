@@ -21,6 +21,9 @@ import {PostgresConnectionOptions} from "./PostgresConnectionOptions";
 import {PostgresQueryRunner} from "./PostgresQueryRunner";
 import {DriverUtils} from "../DriverUtils";
 import { TypeORMError } from "../../error";
+import { Table } from "../../schema-builder/table/Table";
+import { View } from "../../schema-builder/view/View";
+import { TableForeignKey } from "../../schema-builder/table/TableForeignKey";
 
 /**
  * Organizes communication with PostgreSQL DBMS.
@@ -67,9 +70,24 @@ export class PostgresDriver implements Driver {
     options: PostgresConnectionOptions;
 
     /**
-     * Master database used to perform all write queries.
+     * Database name used to perform all write queries.
      */
     database?: string;
+
+    /**
+     * Schema name used to perform all write queries.
+     */
+    schema?: string;
+
+    /**
+     * Schema that's used internally by Postgres for object resolution.
+     *
+     * Because we never set this we have to track it in separately from the `schema` so
+     * we know when we have to specify the full schema or not.
+     *
+     * In most cases this will be `public`.
+     */
+    searchSchema?: string;
 
     /**
      * Indicates if replication is enabled.
@@ -266,6 +284,7 @@ export class PostgresDriver implements Driver {
         this.loadDependencies();
 
         this.database = DriverUtils.buildDriverOptions(this.options.replication ? this.options.replication.master : this.options).database;
+        this.schema = DriverUtils.buildDriverOptions(this.options).schema;
 
         // ObjectUtils.assign(this.options, DriverUtils.buildDriverOptions(connection.options)); // todo: do it better way
         // validate options to make sure everything is set
@@ -294,11 +313,26 @@ export class PostgresDriver implements Driver {
                 return this.createPool(this.options, slave);
             }));
             this.master = await this.createPool(this.options, this.options.replication.master);
-            this.database = this.options.replication.master.database;
-
         } else {
             this.master = await this.createPool(this.options, this.options);
-            this.database = this.options.database;
+        }
+
+        if (!this.database || !this.searchSchema) {
+            const queryRunner = await this.createQueryRunner("master");
+
+            if (!this.database) {
+                this.database = await queryRunner.getCurrentDatabase();
+            }
+
+            if (!this.searchSchema) {
+                this.searchSchema = await queryRunner.getCurrentSchema();
+            }
+
+            await queryRunner.release();
+        }
+
+        if (!this.schema) {
+            this.schema = this.searchSchema;
         }
     }
 
@@ -625,7 +659,7 @@ export class PostgresDriver implements Driver {
         if (!parameters || !Object.keys(parameters).length)
             return [sql, escapedParameters];
 
-        sql = sql.replace(/:(\.\.\.)?([A-Za-z0-9_]+)/g, (full, isArray: string, key: string): string => {
+        sql = sql.replace(/:(\.\.\.)?([A-Za-z0-9_.]+)/g, (full, isArray: string, key: string): string => {
             if (!parameters.hasOwnProperty(key)) {
                 return full;
             }
@@ -669,6 +703,53 @@ export class PostgresDriver implements Driver {
         }
 
         return tablePath.join('.');
+    }
+
+    /**
+     * Parse a target table name or other types and return a normalized table definition.
+     */
+    parseTableName(target: EntityMetadata | Table | View | TableForeignKey | string): { database?: string, schema?: string, tableName: string } {
+        const driverDatabase = this.database;
+        const driverSchema = this.schema;
+
+        if (target instanceof Table || target instanceof View) {
+            const parsed = this.parseTableName(target.name);
+
+            return {
+                database: target.database || parsed.database || driverDatabase,
+                schema: target.schema || parsed.schema || driverSchema,
+                tableName: parsed.tableName
+            };
+        }
+
+        if (target instanceof TableForeignKey) {
+            const parsed = this.parseTableName(target.referencedTableName);
+
+            return {
+                database: target.referencedDatabase || parsed.database || driverDatabase,
+                schema: target.referencedSchema || parsed.schema || driverSchema,
+                tableName: parsed.tableName
+            };
+        }
+
+        if (target instanceof EntityMetadata) {
+            // EntityMetadata tableName is never a path
+
+            return {
+                database: target.database || driverDatabase,
+                schema: target.schema || driverSchema,
+                tableName: target.tableName
+            }
+
+        }
+
+        const parts = target.split(".")
+
+        return {
+            database: driverDatabase,
+            schema: (parts.length > 1 ? parts[0] : undefined) || driverSchema,
+            tableName: parts.length > 1 ? parts[1] : parts[0],
+        };
     }
 
     /**
@@ -858,6 +939,11 @@ export class PostgresDriver implements Driver {
      */
     obtainMasterConnection(): Promise<any> {
         return new Promise((ok, fail) => {
+            if (!this.master) {
+                fail(new TypeORMError("Driver not Connected"))
+                return;
+            }
+
             this.master.connect((err: any, connection: any, release: any) => {
                 err ? fail(err) : ok([connection, release]);
             });
@@ -869,9 +955,10 @@ export class PostgresDriver implements Driver {
      * Used for replication.
      * If replication is not setup then returns master (default) connection's database connection.
      */
-    obtainSlaveConnection(): Promise<any> {
-        if (!this.slaves.length)
+    async obtainSlaveConnection(): Promise<any> {
+        if (!this.slaves.length) {
             return this.obtainMasterConnection();
+        }
 
         return new Promise((ok, fail) => {
             const random = Math.floor(Math.random() * this.slaves.length);
@@ -1049,7 +1136,8 @@ export class PostgresDriver implements Driver {
             database: credentials.database,
             port: credentials.port,
             ssl: credentials.ssl,
-            connectionTimeoutMillis: options.connectTimeoutMS
+            connectionTimeoutMillis: options.connectTimeoutMS,
+            application_name: options.applicationName
         }, options.extra || {});
 
         // create a connection pool

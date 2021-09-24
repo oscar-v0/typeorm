@@ -93,6 +93,8 @@ As an alternative, you can use CLI and run migration:run command.
 * `migrationsTableName` - Name of the table in the database which is going to contain information about executed migrations.
 By default this table is called "migrations".
 
+* `migrationsTransactionMode` - Control transactions for migrations (default: `all`), can be one of `all` | `none` | `each`
+
 * `cache` - Enables entity result caching. You can also configure cache type and other cache options here.
 Read more about caching [here](./caching.md).
 
@@ -190,6 +192,8 @@ See [SSL options](https://github.com/mysqljs/mysql#ssl-options).
 * `logNotifications` - A boolean to determine whether postgres server [notice messages](https://www.postgresql.org/docs/current/plpgsql-errors-and-messages.html) and [notification events](https://www.postgresql.org/docs/current/sql-notify.html) should be included in client's logs with `info` level (default: `false`).
 
 * `installExtensions` - A boolean to control whether to install necessary postgres extensions automatically or not (default: `true`)
+
+* `applicationName` - A string visible in statistics and logs to help referencing an application to a connection (default: `undefined`)
 
 ## `sqlite` connection options
 

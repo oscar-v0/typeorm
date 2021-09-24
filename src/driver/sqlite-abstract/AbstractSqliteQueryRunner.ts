@@ -346,7 +346,7 @@ export abstract class AbstractSqliteQueryRunner extends BaseQueryRunner implemen
 
         // rename foreign key constraints
         newTable.foreignKeys.forEach(foreignKey => {
-            foreignKey.name = this.connection.namingStrategy.foreignKeyName(newTable, foreignKey.columnNames, foreignKey.referencedTableName, foreignKey.referencedColumnNames);
+            foreignKey.name = this.connection.namingStrategy.foreignKeyName(newTable, foreignKey.columnNames, this.getTablePath(foreignKey), foreignKey.referencedColumnNames);
         });
 
         // rename indices
@@ -426,7 +426,7 @@ export abstract class AbstractSqliteQueryRunner extends BaseQueryRunner implemen
                 changedTable.findColumnForeignKeys(changedColumnSet.oldColumn).forEach(fk => {
                     fk.columnNames.splice(fk.columnNames.indexOf(changedColumnSet.oldColumn.name), 1);
                     fk.columnNames.push(changedColumnSet.newColumn.name);
-                    fk.name = this.connection.namingStrategy.foreignKeyName(changedTable, fk.columnNames, fk.referencedTableName, fk.referencedColumnNames);
+                    fk.name = this.connection.namingStrategy.foreignKeyName(changedTable, fk.columnNames, this.getTablePath(fk), fk.referencedColumnNames);
                 });
 
                 changedTable.findColumnIndices(changedColumnSet.oldColumn).forEach(index => {
@@ -458,27 +458,23 @@ export abstract class AbstractSqliteQueryRunner extends BaseQueryRunner implemen
     /**
      * Drops the columns in the table.
      */
-    async dropColumns(tableOrName: Table|string, columns: TableColumn[]): Promise<void> {
+    async dropColumns(tableOrName: Table|string, columns: TableColumn[]|string[]): Promise<void> {
         const table = tableOrName instanceof Table ? tableOrName : await this.getCachedTable(tableOrName);
 
         // clone original table and remove column and its constraints from cloned table
         const changedTable = table.clone();
-        columns.forEach(column => {
-            changedTable.removeColumn(column);
-            changedTable.findColumnUniques(column).forEach(unique => changedTable.removeUniqueConstraint(unique));
-            changedTable.findColumnIndices(column).forEach(index => changedTable.removeIndex(index));
-            changedTable.findColumnForeignKeys(column).forEach(fk => changedTable.removeForeignKey(fk));
+        columns.forEach((column: TableColumn|string) => {
+            const columnInstance = column instanceof TableColumn ? column : table.findColumnByName(column);
+            if (!columnInstance)
+                throw new Error(`Column "${column}" was not found in table "${table.name}"`);
+
+            changedTable.removeColumn(columnInstance);
+            changedTable.findColumnUniques(columnInstance).forEach(unique => changedTable.removeUniqueConstraint(unique));
+            changedTable.findColumnIndices(columnInstance).forEach(index => changedTable.removeIndex(index));
+            changedTable.findColumnForeignKeys(columnInstance).forEach(fk => changedTable.removeForeignKey(fk));
         });
 
         await this.recreateTable(changedTable, table);
-
-        // remove column and its constraints from original table.
-        columns.forEach(column => {
-            table.removeColumn(column);
-            table.findColumnUniques(column).forEach(unique => table.removeUniqueConstraint(unique));
-            table.findColumnIndices(column).forEach(index => table.removeIndex(index));
-            table.findColumnForeignKeys(column).forEach(fk => table.removeForeignKey(fk));
-        });
     }
 
     /**
@@ -1064,7 +1060,7 @@ export abstract class AbstractSqliteQueryRunner extends BaseQueryRunner implemen
             const foreignKeysSql = table.foreignKeys.map(fk => {
                 const columnNames = fk.columnNames.map(columnName => `"${columnName}"`).join(", ");
                 if (!fk.name)
-                    fk.name = this.connection.namingStrategy.foreignKeyName(table, fk.columnNames, fk.referencedTableName, fk.referencedColumnNames);
+                    fk.name = this.connection.namingStrategy.foreignKeyName(table, fk.columnNames, this.getTablePath(fk), fk.referencedColumnNames);
                 const referencedColumnNames = fk.referencedColumnNames.map(columnName => `"${columnName}"`).join(", ");
 
                 let constraint = `CONSTRAINT "${fk.name}" FOREIGN KEY (${columnNames}) REFERENCES "${fk.referencedTableName}" (${referencedColumnNames})`;
@@ -1086,7 +1082,7 @@ export abstract class AbstractSqliteQueryRunner extends BaseQueryRunner implemen
 
         sql += `)`;
 
-        const tableMetadata = this.connection.entityMetadatas.find(metadata => metadata.tableName === table.name);
+        const tableMetadata = this.connection.entityMetadatas.find(metadata => this.getTablePath(table) === this.getTablePath(metadata));
         if (tableMetadata && tableMetadata.withoutRowid) {
             sql += " WITHOUT ROWID";
         }

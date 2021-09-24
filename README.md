@@ -16,7 +16,7 @@
     <a href="https://codecov.io/gh/typeorm/typeorm">
         <img alt="Codecov" src="https://img.shields.io/codecov/c/github/typeorm/typeorm.svg">
     </a>
-	<a href="https://join.slack.com/t/typeorm/shared_invite/zt-gej3gc00-hR~L~DqGUJ7qOpGy4SSq3g">
+	<a href="https://join.slack.com/t/typeorm/shared_invite/zt-uu12ljeb-OH_0086I379fUDApYJHNuw">
 		<img src="https://img.shields.io/badge/chat-on%20slack-blue.svg">
 	</a>
   <br>
@@ -219,7 +219,7 @@ await timber.remove();
 
     * for **MongoDB** (experimental)
 
-        `npm install mongodb --save`
+        `npm install mongodb@^3.6.0 --save`
 
     * for **NativeScript**, **react-native** and **Cordova**
 
@@ -1294,6 +1294,7 @@ There are several extensions that simplify working with TypeORM and integrating 
 * Models generation from existing database - [typeorm-model-generator](https://github.com/Kononnable/typeorm-model-generator)
 * Fixtures loader - [typeorm-fixtures-cli](https://github.com/RobinCK/typeorm-fixtures)
 * ER Diagram generator - [typeorm-uml](https://github.com/eugene-manuilov/typeorm-uml/)
+* Create/Drop database - [typeorm-extension](https://github.com/Tada5hi/typeorm-extension)
 
 ## Contributing
 

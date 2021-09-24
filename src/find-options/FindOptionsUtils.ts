@@ -96,6 +96,10 @@ export class FindOptionsUtils {
         const metadata = qb.expressionMap.mainAlias!.metadata;
 
         // apply all options from FindOptions
+        if (options.withDeleted) {
+            qb.withDeleted();
+        }
+
         if (options.select) {
             qb.select([]);
             options.select.forEach(select => {
@@ -169,10 +173,6 @@ export class FindOptionsUtils {
             }
         }
 
-        if (options.withDeleted) {
-            qb.withDeleted();
-        }
-
         if (options.loadRelationIds === true) {
             qb.loadAllRelationIds();
 
@@ -222,7 +222,7 @@ export class FindOptionsUtils {
     /**
      * Adds joins for all relations and sub-relations of the given relations provided in the find options.
      */
-    protected static applyRelationsRecursively(qb: SelectQueryBuilder<any>, allRelations: string[], alias: string, metadata: EntityMetadata, prefix: string): void {
+    public static applyRelationsRecursively(qb: SelectQueryBuilder<any>, allRelations: string[], alias: string, metadata: EntityMetadata, prefix: string): void {
 
         // find all relations that match given prefix
         let matchedBaseRelations: string[] = [];
